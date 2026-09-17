@@ -33,3 +33,10 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Local environment variables and secrets (direnv)
+.envrc
+
+# Runtime monitoring data
+grafana/data/
+prometheus/data/
