@@ -15,7 +15,6 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.util.*
 
-
 @Configuration
 class PaymentAccountsConfig {
     companion object {
@@ -37,19 +36,21 @@ class PaymentAccountsConfig {
 
     @Bean
     fun accountAdapters(paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>): List<PaymentExternalSystemAdapter> {
-        val request = HttpRequest.newBuilder()
-            .uri(URI("http://${paymentProviderHostPort}/external/accounts?serviceName=$serviceName&token=$token"))
-            .GET()
-            .build()
+        val request =
+            HttpRequest
+                .newBuilder()
+                .uri(URI("http://$paymentProviderHostPort/external/accounts?serviceName=$serviceName&token=$token"))
+                .GET()
+                .build()
 
         val resp = javaClient.send(request, HttpResponse.BodyHandlers.ofString())
 
         println("\nPayment accounts list:")
-        return mapper.readValue<List<PaymentAccountProperties>>(
-            resp.body(),
-            mapper.typeFactory.constructCollectionType(List::class.java, PaymentAccountProperties::class.java)
-        )
-            .filter { it.accountName in allowedAccounts }
+        return mapper
+            .readValue<List<PaymentAccountProperties>>(
+                resp.body(),
+                mapper.typeFactory.constructCollectionType(List::class.java, PaymentAccountProperties::class.java),
+            ).filter { it.accountName in allowedAccounts }
             .map { it.copy(enabled = true) }
             .onEach(::println)
             .map {
@@ -57,7 +58,7 @@ class PaymentAccountsConfig {
                     it,
                     paymentService,
                     paymentProviderHostPort,
-                    token
+                    token,
                 )
             }
     }

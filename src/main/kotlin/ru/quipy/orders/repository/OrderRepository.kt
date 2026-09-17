@@ -12,24 +12,22 @@ import java.util.*
 
 @Service
 class OrderRepository {
-
     val logger: Logger = LoggerFactory.getLogger(OrderRepository::class.java)
 
     @Autowired
     lateinit var subscriptionsManager: AggregateSubscriptionsManager
 
-    private val orderCache = Caffeine.newBuilder()
-        .maximumSize(100_000_000)
-        .expireAfterWrite(Duration.ofHours(5))
-        .build<UUID, Order?>()
-
+    private val orderCache =
+        Caffeine
+            .newBuilder()
+            .maximumSize(100_000_000)
+            .expireAfterWrite(Duration.ofHours(5))
+            .build<UUID, Order?>()
 
     fun save(order: Order): Order {
         orderCache.put(order.id, order)
         return order
     }
 
-    fun findById(id: UUID): Order? {
-        return orderCache.getIfPresent(id)
-    }
+    fun findById(id: UUID): Order? = orderCache.getIfPresent(id)
 }

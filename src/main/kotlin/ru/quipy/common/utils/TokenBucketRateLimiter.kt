@@ -15,28 +15,45 @@ class TokenBucketRateLimiter(
     private val bucketMaxCapacity: Int,
     private val window: Long,
     private val timeUnit: TimeUnit = TimeUnit.MINUTES,
-): RateLimiter {
+) : RateLimiter {
     companion object {
         private val logger: Logger = LoggerFactory.getLogger(TokenBucketRateLimiter::class.java)
     }
 
-    private val rateLimiterScope = CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
+    private val rateLimiterScope =
+        CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
 
     private var bucket: AtomicInteger = AtomicInteger(0)
     private var start = System.currentTimeMillis()
     private var nextExpectedWakeUp = start + timeUnit.toMillis(window)
 
-    private val releaseJob = rateLimiterScope.launch {
-        while (true) {
-            start = System.currentTimeMillis()
-            nextExpectedWakeUp = start + timeUnit.toMillis(window)
+    private val releaseJob =
+        rateLimiterScope
+            .launch {
+                while (true) {
+                    start = System.currentTimeMillis()
+                    nextExpectedWakeUp = start + timeUnit.toMillis(window)
 
-            bucket.get().let { cur ->
-                bucket.addAndGet(if (cur + rate > bucketMaxCapacity) bucketMaxCapacity - cur else rate)
+                    bucket.get().let { cur ->
+                        bucket.addAndGet(
+                            if (cur + rate >
+                                bucketMaxCapacity
+                            ) {
+                                bucketMaxCapacity - cur
+                            } else {
+                                rate
+                            },
+                        )
+                    }
+                    delay(nextExpectedWakeUp - System.currentTimeMillis())
+                }
+            }.invokeOnCompletion { th ->
+                if (th !=
+                    null
+                ) {
+                    logger.error("Rate limiter release job completed", th)
+                }
             }
-            delay(nextExpectedWakeUp - System.currentTimeMillis())
-        }
-    }.invokeOnCompletion { th -> if (th != null) logger.error("Rate limiter release job completed", th) }
 
     override fun tick(): Boolean {
         while (true) {

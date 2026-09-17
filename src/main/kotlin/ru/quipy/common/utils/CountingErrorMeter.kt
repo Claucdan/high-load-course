@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 class CountingErrorMeter(
     private val window: Int,
-    private val minNumberInvocations: Long = 50
+    private val minNumberInvocations: Long = 50,
 ) {
     private val invocations: Array<Event?> = Array(window) { null }
     private val counter = AtomicInteger()
@@ -33,7 +33,6 @@ class CountingErrorMeter(
         }
     }
 
-
     fun onFailure() {
         val index = counter.getAndIncrement()
         val current = invocations[index % window]
@@ -55,12 +54,12 @@ class CountingErrorMeter(
         }
     }
 
-    fun getAvgRatio(): Double {
-        return if (total.get() < minNumberInvocations) 0.0 else err.get().toDouble() / total.get()
-    }
+    fun getAvgRatio(): Double =
+        if (total.get() < minNumberInvocations) 0.0 else err.get().toDouble() / total.get()
 
     sealed class Event {
         class Failure : Event()
+
         class Success : Event()
     }
 }

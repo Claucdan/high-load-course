@@ -52,7 +52,7 @@ To pull changes from the main repository, run the following commands:
 ```
 git fetch upstream
 # switch to the main branch of your fork. Make sure the branch has no uncommitted changes to avoid conflicts
-git checkout main 
+git checkout main
 # merge changes from the main repository into your main branch
-git merge upstream/main 
+git merge upstream/main
 ```

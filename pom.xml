@@ -23,6 +23,8 @@
         <resilience4jVersion>2.2.0</resilience4jVersion>
         <json-datatype.version>2.9.8</json-datatype.version>
         <caffeine.version>3.1.8</caffeine.version>
+        <spotless.version>2.44.3</spotless.version>
+        <ktlint.version>1.5.0</ktlint.version>
     </properties>
 
 	<dependencies>
@@ -138,6 +140,46 @@
         <sourceDirectory>${project.basedir}/src/main/kotlin</sourceDirectory>
         <testSourceDirectory>src/test/kotlin</testSourceDirectory>
         <plugins>
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless.version}</version>
+                <configuration>
+                    <formats>
+                        <format>
+                            <includes>
+                                <include>**/*.md</include>
+                                <include>**/*.xml</include>
+                                <include>**/*.yaml</include>
+                                <include>**/*.yml</include>
+                                <include>**/*.json</include>
+                                <include>**/*.properties</include>
+                            </includes>
+                            <excludes>
+                                <exclude>target/**</exclude>
+                                <exclude>grafana/data/**</exclude>
+                                <exclude>prometheus/data/**</exclude>
+                            </excludes>
+                            <trimTrailingWhitespace/>
+                            <endWithNewline/>
+                        </format>
+                    </formats>
+                    <kotlin>
+                        <includes>
+                            <include>src/**/*.kt</include>
+                            <include>src/**/*.kts</include>
+                        </includes>
+                        <excludes>
+                            <exclude>target/**</exclude>
+                        </excludes>
+                        <ktlint>
+                            <version>${ktlint.version}</version>
+                        </ktlint>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </kotlin>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

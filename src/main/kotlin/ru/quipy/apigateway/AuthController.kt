@@ -8,18 +8,20 @@ import org.springframework.web.bind.annotation.RestController
 
 @RestController
 class AuthController {
-
     val logger: Logger = LoggerFactory.getLogger(AuthController::class.java)
 
     @PostMapping("/authentication")
-    fun authentication(@RequestBody jsonString: String): TokenResponse {
-        return TokenResponse("accessToken", "refreshToken")
-    }
+    fun authentication(
+        @RequestBody jsonString: String,
+    ): TokenResponse = TokenResponse("accessToken", "refreshToken")
 
     @PostMapping("/authentication/refresh")
-    fun authenticationRefresh(@RequestBody jsonString: String): TokenResponse {
-        return TokenResponse("accessToken", "refreshToken")
-    }
+    fun authenticationRefresh(
+        @RequestBody jsonString: String,
+    ): TokenResponse = TokenResponse("accessToken", "refreshToken")
 
-    data class TokenResponse(val accessToken: String, val refreshToken: String)
+    data class TokenResponse(
+        val accessToken: String,
+        val refreshToken: String,
+    )
 }

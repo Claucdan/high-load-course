@@ -1,5 +1,6 @@
 package ru.quipy.payments.subscribers
 
+import jakarta.annotation.PostConstruct
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -12,11 +13,9 @@ import ru.quipy.streams.annotation.RetryFailedStrategy
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
-import jakarta.annotation.PostConstruct
 
 @Service
 class PaymentTransactionsSubscriber {
-
     val logger: Logger = LoggerFactory.getLogger(PaymentTransactionsSubscriber::class.java)
 
     val paymentLog: MutableMap<UUID, MutableList<PaymentLogRecord>> = ConcurrentHashMap()
@@ -29,19 +28,20 @@ class PaymentTransactionsSubscriber {
         subscriptionsManager.createSubscriber(
             PaymentAggregate::class,
             "payments:payment-processings-subscriber",
-            retryConf = RetryConf(1, RetryFailedStrategy.SKIP_EVENT)
+            retryConf = RetryConf(1, RetryFailedStrategy.SKIP_EVENT),
         ) {
             `when`(PaymentProcessedEvent::class) { event ->
-                paymentLog.computeIfAbsent(event.orderId) {
-                    CopyOnWriteArrayList()
-                }.add(
-                    PaymentLogRecord(
-                        event.processedAt,
-                        status = if (event.success) PaymentStatus.SUCCESS else PaymentStatus.FAILED,
-                        event.amount,
-                        event.paymentId,
+                paymentLog
+                    .computeIfAbsent(event.orderId) {
+                        CopyOnWriteArrayList()
+                    }.add(
+                        PaymentLogRecord(
+                            event.processedAt,
+                            status = if (event.success) PaymentStatus.SUCCESS else PaymentStatus.FAILED,
+                            event.amount,
+                            event.paymentId,
+                        ),
                     )
-                )
             }
         }
     }
@@ -55,6 +55,6 @@ class PaymentTransactionsSubscriber {
 
     enum class PaymentStatus {
         FAILED,
-        SUCCESS
+        SUCCESS,
     }
 }

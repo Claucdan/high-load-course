@@ -16,9 +16,9 @@ class PaymentCreatedEvent(
     val amount: Int,
     createdAt: Long = System.currentTimeMillis(),
 ) : Event<PaymentAggregate>(
-    name = PAYMENT_CREATED_EVENT,
-    createdAt = createdAt,
-)
+        name = PAYMENT_CREATED_EVENT,
+        createdAt = createdAt,
+    )
 
 @DomainEvent(name = PAYMENT_SUBMITTED_EVENT)
 class PaymentSubmittedEvent(
@@ -30,9 +30,9 @@ class PaymentSubmittedEvent(
     val spentInQueueDuration: Duration,
     createdAt: Long = System.currentTimeMillis(),
 ) : Event<PaymentAggregate>(
-    name = PAYMENT_SUBMITTED_EVENT,
-    createdAt = createdAt,
-)
+        name = PAYMENT_SUBMITTED_EVENT,
+        createdAt = createdAt,
+    )
 
 @DomainEvent(name = PAYMENT_PROCESSED_EVENT)
 class PaymentProcessedEvent(
@@ -47,6 +47,6 @@ class PaymentProcessedEvent(
     val spentInQueueDuration: Duration,
     createdAt: Long = System.currentTimeMillis(),
 ) : Event<PaymentAggregate>(
-    name = PAYMENT_PROCESSED_EVENT,
-    createdAt = createdAt,
-)
+        name = PAYMENT_PROCESSED_EVENT,
+        createdAt = createdAt,
+    )
