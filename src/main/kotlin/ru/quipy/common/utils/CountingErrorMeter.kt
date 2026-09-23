@@ -54,7 +54,8 @@ class CountingErrorMeter(
         }
     }
 
-    fun getAvgRatio(): Double = if (total.get() < minNumberInvocations) 0.0 else err.get().toDouble() / total.get()
+    fun getAvgRatio(): Double =
+        if (total.get() < minNumberInvocations) 0.0 else err.get().toDouble() / total.get()
 
     sealed class Event {
         class Failure : Event()
