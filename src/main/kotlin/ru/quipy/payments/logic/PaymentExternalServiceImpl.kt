@@ -14,7 +14,19 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 
-// Advice: always treat time as a Duration
+/**
+ * Sends payments through one configured external provider account.
+ *
+ * The adapter applies two forms of back pressure before performing an HTTP call:
+ * [OngoingWindow] limits concurrent operations and [SlidingWindowRateLimiter] limits the request
+ * rate. Both waits respect the payment deadline and leave enough time for the provider's average
+ * processing duration.
+ *
+ * @param properties limits and metadata reported for the provider account
+ * @param paymentESService event-sourcing service used to persist submission and processing results
+ * @param paymentProviderHostPort provider address in `host:port` form
+ * @param token authentication token passed to the provider
+ */
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
@@ -42,6 +54,14 @@ class PaymentExternalSystemAdapterImpl(
         )
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
+    /**
+     * Processes a payment request while respecting concurrency, rate and deadline constraints.
+     *
+     * @param paymentId aggregate identifier of the payment
+     * @param amount amount submitted to the provider
+     * @param paymentStartedAt Unix timestamp in milliseconds when the application accepted payment
+     * @param deadline absolute Unix timestamp in milliseconds by which processing should complete
+     */
     override fun performPaymentAsync(
         paymentId: UUID,
         amount: Int,
@@ -152,10 +172,13 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
+    /** Returns the configured cost of using this provider account. */
     override fun price() = properties.price
 
+    /** Returns whether this provider account is available for payment routing. */
     override fun isEnabled() = properties.enabled
 
+    /** Returns the unique provider account name. */
     override fun name() = properties.accountName
 
     private fun queueWaitTimeout(deadline: Long): Duration =
@@ -164,4 +187,5 @@ class PaymentExternalSystemAdapterImpl(
         )
 }
 
+/** Returns the current wall-clock time as a Unix timestamp in milliseconds. */
 public fun now() = System.currentTimeMillis()
