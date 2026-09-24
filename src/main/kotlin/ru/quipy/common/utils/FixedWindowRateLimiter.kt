@@ -155,17 +155,19 @@ fun makeRateLimiter(
     rate: Int,
     timeUnit: TimeUnit = TimeUnit.SECONDS,
 ): io.github.resilience4j.ratelimiter.RateLimiter {
+    val refreshPeriod =
+        Duration
+            .ofNanos(timeUnit.toNanos(1) / rate)
+            .multipliedBy(105)
+            .dividedBy(100)
+    val timeoutDuration = Duration.ofNanos(timeUnit.toNanos(2))
+
     val config =
         RateLimiterConfig
             .custom()
-            .limitRefreshPeriod(
-                if (timeUnit == TimeUnit.SECONDS) {
-                    Duration.ofSeconds(1)
-                } else {
-                    Duration.ofMinutes(1)
-                },
-            ).limitForPeriod(rate)
-            .timeoutDuration(Duration.ofMillis(5))
+            .limitRefreshPeriod(refreshPeriod)
+            .limitForPeriod(1)
+            .timeoutDuration(timeoutDuration)
             .build()
 
     val rateLimiterRegistry = RateLimiterRegistry.of(config)

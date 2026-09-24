@@ -2,10 +2,12 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.github.resilience4j.ratelimiter.RateLimiter
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.makeRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -28,11 +30,10 @@ class PaymentExternalSystemAdapterImpl(
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
-    private val parallelRequests = properties.parallelRequests
 
     private val client = OkHttpClient.Builder().build()
+    private val rateLimiter = makeRateLimiter(accountName, rateLimitPerSec)
 
     override fun performPaymentAsync(
         paymentId: UUID,
@@ -41,7 +42,6 @@ class PaymentExternalSystemAdapterImpl(
         deadline: Long,
     ) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
-
         val transactionId = UUID.randomUUID()
 
         // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
@@ -53,6 +53,8 @@ class PaymentExternalSystemAdapterImpl(
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
         try {
+            RateLimiter.waitForPermission(rateLimiter)
+
             val request =
                 Request
                     .Builder()
