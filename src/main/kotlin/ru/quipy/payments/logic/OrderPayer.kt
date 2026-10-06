@@ -1,5 +1,7 @@
 package ru.quipy.payments.logic
 
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -14,7 +16,9 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 @Service
-class OrderPayer {
+class OrderPayer(
+    registry: MeterRegistry,
+) {
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
     }
@@ -35,6 +39,11 @@ class OrderPayer {
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler(),
         )
+
+    init {
+        Gauge.builder("payment.executor.queued", paymentExecutor) { it.queue.size.toDouble() }.register(registry)
+        Gauge.builder("payment.executor.active", paymentExecutor) { it.activeCount.toDouble() }.register(registry)
+    }
 
     fun processPayment(
         orderId: UUID,

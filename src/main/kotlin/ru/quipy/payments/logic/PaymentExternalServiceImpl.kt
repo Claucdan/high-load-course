@@ -3,6 +3,9 @@ package ru.quipy.payments.logic
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.github.resilience4j.ratelimiter.RateLimiter
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -22,6 +25,7 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
+    private val registry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
@@ -37,6 +41,20 @@ class PaymentExternalSystemAdapterImpl(
     private val client = OkHttpClient.Builder().build()
     private val rateLimiter = makeRateLimiter(accountName, rateLimitPerSec)
     private val requestWindow = Semaphore(properties.parallelRequests, true)
+
+    private val waitTimer = Timer.builder("payment.wait").tag("account", accountName).register(registry)
+
+    init {
+        Gauge
+            .builder("payment.requests.active", requestWindow) {
+                (properties.parallelRequests - it.availablePermits()).toDouble()
+            }.tag("account", accountName)
+            .register(registry)
+        Gauge
+            .builder("payment.requests.waiting", requestWindow) { it.queueLength.toDouble() }
+            .tag("account", accountName)
+            .register(registry)
+    }
 
     override fun performPaymentAsync(
         paymentId: UUID,
@@ -56,6 +74,8 @@ class PaymentExternalSystemAdapterImpl(
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
         var windowAcquired = false
+        var outcome = "error"
+        var requestSample: Timer.Sample? = null
         try {
             val remainingTime = deadline - now()
             if (remainingTime <= 0 || !requestWindow.tryAcquire(remainingTime, TimeUnit.MILLISECONDS)) {
@@ -72,6 +92,8 @@ class PaymentExternalSystemAdapterImpl(
                         post(emptyBody)
                     }.build()
 
+            waitTimer.record(maxOf(0, now() - paymentStartedAt), TimeUnit.MILLISECONDS)
+            requestSample = Timer.start(registry)
             client.newCall(request).execute().use { response ->
                 val body =
                     try {
@@ -81,6 +103,7 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
+                outcome = if (body.result) "success" else "provider_rejected"
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                 // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
@@ -92,6 +115,7 @@ class PaymentExternalSystemAdapterImpl(
         } catch (e: Exception) {
             when (e) {
                 is SocketTimeoutException -> {
+                    outcome = if (windowAcquired) "timeout" else "deadline"
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
@@ -108,6 +132,9 @@ class PaymentExternalSystemAdapterImpl(
             }
         } finally {
             if (windowAcquired) requestWindow.release()
+            registry.counter("payment.requests", "account", accountName, "outcome", outcome).increment()
+            requestSample?.stop(Timer.builder("payment.provider.duration").tags("account", accountName, "outcome", outcome).register(registry))
+            if (requestSample == null) waitTimer.record(maxOf(0, now() - paymentStartedAt), TimeUnit.MILLISECONDS)
         }
     }
 
