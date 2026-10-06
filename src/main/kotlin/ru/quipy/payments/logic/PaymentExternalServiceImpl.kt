@@ -44,7 +44,6 @@ class PaymentExternalSystemAdapterImpl(
             .readTimeout(Duration.ofSeconds(15))
             .retryOnConnectionFailure(false)
             .addNetworkInterceptor { chain ->
-                // Pace actual sends after connecting; delayed threads must not send reserved permits in a burst.
                 waitForRequestRateLimit(chain.request().tag(Long::class.javaObjectType)!!)
                 chain.proceed(chain.request())
             }.build()
@@ -115,7 +114,6 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
-                // The provider has finished; do not occupy its window while writing the result to the database.
                 requestWindow.release()
                 windowAcquired = false
                 outcome = if (body.result) "success" else "provider_rejected"
