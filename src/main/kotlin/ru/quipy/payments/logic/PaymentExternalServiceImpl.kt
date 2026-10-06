@@ -2,17 +2,20 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import io.github.resilience4j.ratelimiter.RateLimiter
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
-import ru.quipy.common.utils.makeRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -20,6 +23,7 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
+    private val registry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
@@ -32,8 +36,32 @@ class PaymentExternalSystemAdapterImpl(
     private val accountName = properties.accountName
     private val rateLimitPerSec = properties.rateLimitPerSec
 
-    private val client = OkHttpClient.Builder().build()
-    private val rateLimiter = makeRateLimiter(accountName, rateLimitPerSec)
+    private val requestIntervalNanos = TimeUnit.SECONDS.toNanos(1) / rateLimitPerSec * 105 / 100
+    private var nextRequestAtNanos = System.nanoTime()
+    private val client =
+        OkHttpClient
+            .Builder()
+            .readTimeout(Duration.ofSeconds(15))
+            .retryOnConnectionFailure(false)
+            .addNetworkInterceptor { chain ->
+                waitForRequestRateLimit(chain.request().tag(Long::class.javaObjectType)!!)
+                chain.proceed(chain.request())
+            }.build()
+    private val requestWindow = Semaphore(properties.parallelRequests, true)
+
+    private val waitTimer = Timer.builder("payment.wait").tag("account", accountName).register(registry)
+
+    init {
+        Gauge
+            .builder("payment.requests.active", requestWindow) {
+                (properties.parallelRequests - it.availablePermits()).toDouble()
+            }.tag("account", accountName)
+            .register(registry)
+        Gauge
+            .builder("payment.requests.waiting", requestWindow) { it.queueLength.toDouble() }
+            .tag("account", accountName)
+            .register(registry)
+    }
 
     override fun performPaymentAsync(
         paymentId: UUID,
@@ -52,8 +80,15 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
+        var windowAcquired = false
+        var outcome = "error"
+        var requestSample: Timer.Sample? = null
         try {
-            RateLimiter.waitForPermission(rateLimiter)
+            val remainingTime = deadline - now()
+            if (remainingTime <= 0 || !requestWindow.tryAcquire(remainingTime, TimeUnit.MILLISECONDS)) {
+                throw SocketTimeoutException("Payment deadline exceeded while waiting for request window.")
+            }
+            windowAcquired = true
 
             val request =
                 Request
@@ -61,9 +96,16 @@ class PaymentExternalSystemAdapterImpl(
                     .run {
                         url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
                         post(emptyBody)
+                        tag(Long::class.javaObjectType, deadline)
                     }.build()
 
-            client.newCall(request).execute().use { response ->
+            waitTimer.record(maxOf(0, now() - paymentStartedAt), TimeUnit.MILLISECONDS)
+            requestSample = Timer.start(registry)
+            val remainingCallTime = deadline - now()
+            if (remainingCallTime <= 0) throw SocketTimeoutException("Payment deadline exceeded before sending request.")
+            val call = client.newCall(request)
+            call.timeout().timeout(remainingCallTime, TimeUnit.MILLISECONDS)
+            call.execute().use { response ->
                 val body =
                     try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -72,6 +114,9 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
+                requestWindow.release()
+                windowAcquired = false
+                outcome = if (body.result) "success" else "provider_rejected"
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                 // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
@@ -83,6 +128,7 @@ class PaymentExternalSystemAdapterImpl(
         } catch (e: Exception) {
             when (e) {
                 is SocketTimeoutException -> {
+                    outcome = if (deadline <= now()) "deadline" else "timeout"
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
@@ -97,7 +143,25 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
+        } finally {
+            if (windowAcquired) requestWindow.release()
+            registry.counter("payment.requests", "account", accountName, "outcome", outcome).increment()
+            requestSample?.stop(Timer.builder("payment.provider.duration").tags("account", accountName, "outcome", outcome).register(registry))
+            if (requestSample == null) waitTimer.record(maxOf(0, now() - paymentStartedAt), TimeUnit.MILLISECONDS)
         }
+    }
+
+    @Synchronized
+    private fun waitForRequestRateLimit(deadline: Long) {
+        var waitNanos = nextRequestAtNanos - System.nanoTime()
+        while (waitNanos > 0) {
+            val remainingTime = deadline - now()
+            if (remainingTime <= 0) throw SocketTimeoutException("Payment deadline exceeded while waiting for rate limit.")
+            TimeUnit.NANOSECONDS.sleep(minOf(waitNanos, TimeUnit.MILLISECONDS.toNanos(remainingTime)))
+            waitNanos = nextRequestAtNanos - System.nanoTime()
+        }
+        if (deadline <= now()) throw SocketTimeoutException("Payment deadline exceeded before sending request.")
+        nextRequestAtNanos = System.nanoTime() + requestIntervalNanos
     }
 
     override fun price() = properties.price
