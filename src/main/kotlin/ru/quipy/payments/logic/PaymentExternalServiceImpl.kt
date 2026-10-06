@@ -13,6 +13,8 @@ import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -34,6 +36,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder().build()
     private val rateLimiter = makeRateLimiter(accountName, rateLimitPerSec)
+    private val requestWindow = Semaphore(properties.parallelRequests, true)
 
     override fun performPaymentAsync(
         paymentId: UUID,
@@ -52,7 +55,13 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
 
+        var windowAcquired = false
         try {
+            val remainingTime = deadline - now()
+            if (remainingTime <= 0 || !requestWindow.tryAcquire(remainingTime, TimeUnit.MILLISECONDS)) {
+                throw SocketTimeoutException("Payment deadline exceeded while waiting for request window.")
+            }
+            windowAcquired = true
             RateLimiter.waitForPermission(rateLimiter)
 
             val request =
@@ -97,6 +106,8 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
+        } finally {
+            if (windowAcquired) requestWindow.release()
         }
     }
 
