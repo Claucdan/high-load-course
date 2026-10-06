@@ -1,6 +1,5 @@
 package ru.quipy.payments.logic
 
-import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.Logger
@@ -30,10 +29,8 @@ class OrderPayer(
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val acceptedCounter =
-        Counter.builder("payment.accepted").description("Payment tasks accepted by the shop").register(registry)
-    private val completedCounter =
-        Counter.builder("payment.completed").description("Payment tasks finished, including failed tasks").register(registry)
+    private val acceptedCounter = registry.counter("payment.accepted")
+    private val completedCounter = registry.counter("payment.completed")
 
     private val paymentExecutor =
         ThreadPoolExecutor(
