@@ -11,6 +11,7 @@ import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
@@ -26,6 +27,8 @@ class PaymentExternalSystemAdapterImpl(
     private val registry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
     companion object {
+        private const val RESPONSE_MARGIN_MILLIS = 1_000L
+
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
@@ -44,8 +47,16 @@ class PaymentExternalSystemAdapterImpl(
             .readTimeout(Duration.ofSeconds(15))
             .retryOnConnectionFailure(false)
             .addNetworkInterceptor { chain ->
-                waitForRequestRateLimit(chain.request().tag(Long::class.javaObjectType)!!)
-                chain.proceed(chain.request())
+                val request = chain.request()
+                val deadline = request.tag(Long::class.javaObjectType)!!
+                waitForRequestRateLimit(deadline)
+                val providerTimeout = Duration.ofMillis(remainingProviderTime(deadline))
+                val url =
+                    request.url
+                        .newBuilder()
+                        .addQueryParameter("timeout", providerTimeout.toString())
+                        .build()
+                chain.proceed(request.newBuilder().url(url).build())
             }.build()
     private val requestWindow = Semaphore(properties.parallelRequests, true)
 
@@ -102,7 +113,7 @@ class PaymentExternalSystemAdapterImpl(
             waitTimer.record(maxOf(0, now() - paymentStartedAt), TimeUnit.MILLISECONDS)
             requestSample = Timer.start(registry)
             val remainingCallTime = deadline - now()
-            if (remainingCallTime <= 0) throw SocketTimeoutException("Payment deadline exceeded before sending request.")
+            remainingProviderTime(deadline)
             val call = client.newCall(request)
             call.timeout().timeout(remainingCallTime, TimeUnit.MILLISECONDS)
             call.execute().use { response ->
@@ -116,7 +127,12 @@ class PaymentExternalSystemAdapterImpl(
 
                 requestWindow.release()
                 windowAcquired = false
-                outcome = if (body.result) "success" else "provider_rejected"
+                outcome =
+                    when {
+                        body.result -> "success"
+                        response.code == 408 -> "deadline"
+                        else -> "provider_rejected"
+                    }
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
                 // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
@@ -127,8 +143,8 @@ class PaymentExternalSystemAdapterImpl(
             }
         } catch (e: Exception) {
             when (e) {
-                is SocketTimeoutException -> {
-                    outcome = if (deadline <= now()) "deadline" else "timeout"
+                is InterruptedIOException -> {
+                    outcome = if (deadline - now() <= RESPONSE_MARGIN_MILLIS) "deadline" else "timeout"
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
@@ -155,13 +171,18 @@ class PaymentExternalSystemAdapterImpl(
     private fun waitForRequestRateLimit(deadline: Long) {
         var waitNanos = nextRequestAtNanos - System.nanoTime()
         while (waitNanos > 0) {
-            val remainingTime = deadline - now()
-            if (remainingTime <= 0) throw SocketTimeoutException("Payment deadline exceeded while waiting for rate limit.")
+            val remainingTime = remainingProviderTime(deadline)
             TimeUnit.NANOSECONDS.sleep(minOf(waitNanos, TimeUnit.MILLISECONDS.toNanos(remainingTime)))
             waitNanos = nextRequestAtNanos - System.nanoTime()
         }
-        if (deadline <= now()) throw SocketTimeoutException("Payment deadline exceeded before sending request.")
+        remainingProviderTime(deadline)
         nextRequestAtNanos = System.nanoTime() + requestIntervalNanos
+    }
+
+    private fun remainingProviderTime(deadline: Long): Long {
+        val remaining = deadline - now() - RESPONSE_MARGIN_MILLIS
+        if (remaining <= 0) throw SocketTimeoutException("Insufficient payment deadline budget to send request and receive its result.")
+        return remaining
     }
 
     override fun price() = properties.price
