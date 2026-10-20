@@ -36,10 +36,7 @@ class PaymentAccountsConfig {
     lateinit var allowedAccounts: List<String>
 
     @Bean
-    fun accountAdapters(
-        paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
-        registry: MeterRegistry,
-    ): List<PaymentExternalSystemAdapter> {
+    fun paymentAccountProperties(): List<PaymentAccountProperties> {
         val request =
             HttpRequest
                 .newBuilder()
@@ -57,6 +54,16 @@ class PaymentAccountsConfig {
             ).filter { it.accountName in allowedAccounts }
             .map { it.copy(enabled = true) }
             .onEach(::println)
+            .also { require(it.isNotEmpty()) { "No payment accounts configured." } }
+    }
+
+    @Bean
+    fun accountAdapters(
+        paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
+        registry: MeterRegistry,
+        accountProperties: List<PaymentAccountProperties>,
+    ): List<PaymentExternalSystemAdapter> =
+        accountProperties
             .map {
                 PaymentExternalSystemAdapterImpl(
                     it,
@@ -66,5 +73,4 @@ class PaymentAccountsConfig {
                     registry,
                 )
             }
-    }
 }
