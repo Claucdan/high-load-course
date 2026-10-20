@@ -18,6 +18,8 @@ import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
+internal const val PAYMENT_RESPONSE_MARGIN_MILLIS = 200L
+
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
@@ -27,8 +29,6 @@ class PaymentExternalSystemAdapterImpl(
     private val registry: MeterRegistry,
 ) : PaymentExternalSystemAdapter {
     companion object {
-        private const val RESPONSE_MARGIN_MILLIS = 1_000L
-
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
 
         val emptyBody = RequestBody.create(null, ByteArray(0))
@@ -144,7 +144,7 @@ class PaymentExternalSystemAdapterImpl(
         } catch (e: Exception) {
             when (e) {
                 is InterruptedIOException -> {
-                    outcome = if (deadline - now() <= RESPONSE_MARGIN_MILLIS) "deadline" else "timeout"
+                    outcome = if (deadline - now() <= PAYMENT_RESPONSE_MARGIN_MILLIS) "deadline" else "timeout"
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
@@ -180,7 +180,7 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     private fun remainingProviderTime(deadline: Long): Long {
-        val remaining = deadline - now() - RESPONSE_MARGIN_MILLIS
+        val remaining = deadline - now() - PAYMENT_RESPONSE_MARGIN_MILLIS
         if (remaining <= 0) throw SocketTimeoutException("Insufficient payment deadline budget to send request and receive its result.")
         return remaining
     }
