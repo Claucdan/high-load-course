@@ -1,76 +1,56 @@
 package ru.quipy.common.utils
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
 import java.time.Duration
-import java.util.concurrent.Executors
-import java.util.concurrent.PriorityBlockingQueue
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 class SlidingWindowRateLimiter(
     private val rate: Long,
-    private val window: Duration,
+    window: Duration,
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : RateLimiter {
-    private val rateLimiterScope =
-        CoroutineScope(Executors.newSingleThreadExecutor().asCoroutineDispatcher())
+    private val windowNanos = window.toNanos()
+    private val lock = ReentrantLock(true)
+    private val requests = ArrayDeque<Long>()
 
-    private val sum = AtomicLong(0)
-    private val queue = PriorityBlockingQueue<Measure>(10_000)
+    init {
+        require(rate > 0)
+        require(windowNanos > 0)
+    }
 
     override fun tick(): Boolean {
-        while (true) {
-            val curSum = sum.get()
-            if (curSum >= rate) return false
-            if (sum.compareAndSet(curSum, curSum + 1)) {
-                queue.add(Measure(1, System.currentTimeMillis()))
-                return true
-            }
+        if (!lock.tryLock()) return false
+        try {
+            return acquirePermit()
+        } finally {
+            lock.unlock()
         }
     }
 
-    fun tickBlocking() {
-        while (!tick()) {
-            Thread.sleep(10)
+    fun tickBlocking(timeout: Duration = Duration.ofMinutes(30)): Boolean {
+        val timeoutNanos = timeout.toNanos().coerceAtLeast(0)
+        val deadline = System.nanoTime() + timeoutNanos
+        if (!lock.tryLock(timeoutNanos, TimeUnit.NANOSECONDS)) return false
+        try {
+            while (!acquirePermit()) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return false
+                val waitNanos = windowNanos - (nanoTime() - requests.first())
+                TimeUnit.NANOSECONDS.sleep(minOf(waitNanos.coerceAtLeast(1), remaining))
+            }
+            return true
+        } finally {
+            lock.unlock()
         }
     }
 
-    data class Measure(
-        val value: Long,
-        val timestamp: Long,
-    ) : Comparable<Measure> {
-        override fun compareTo(other: Measure): Int = timestamp.compareTo(other.timestamp)
-    }
-
-    private val releaseJob =
-        rateLimiterScope
-            .launch {
-                while (true) {
-                    val head = queue.peek()
-                    val winStart = System.currentTimeMillis() - window.toMillis()
-                    if (head == null) {
-                        delay(1L)
-                        continue
-                    }
-                    if (head.timestamp > winStart) {
-                        delay(head.timestamp - winStart)
-                        continue
-                    }
-                    sum.addAndGet(-1)
-                    queue.take()
-                }
-            }.invokeOnCompletion { th ->
-                if (th !=
-                    null
-                ) {
-                    logger.error("Rate limiter release job completed", th)
-                }
-            }
-
-    companion object {
-        private val logger: Logger = LoggerFactory.getLogger(SlidingWindowRateLimiter::class.java)
+    private fun acquirePermit(): Boolean {
+        val now = nanoTime()
+        while (requests.isNotEmpty() && now - requests.first() >= windowNanos) {
+            requests.removeFirst()
+        }
+        if (requests.size >= rate) return false
+        requests.addLast(now)
+        return true
     }
 }

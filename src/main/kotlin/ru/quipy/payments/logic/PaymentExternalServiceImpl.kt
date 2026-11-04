@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.io.InterruptedIOException
@@ -39,8 +40,7 @@ class PaymentExternalSystemAdapterImpl(
     private val accountName = properties.accountName
     private val rateLimitPerSec = properties.rateLimitPerSec
 
-    private val requestIntervalNanos = TimeUnit.SECONDS.toNanos(1) / rateLimitPerSec * 105 / 100
-    private var nextRequestAtNanos = System.nanoTime()
+    private val requestRateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1).plusMillis(1))
     private val client =
         OkHttpClient
             .Builder()
@@ -167,16 +167,10 @@ class PaymentExternalSystemAdapterImpl(
         }
     }
 
-    @Synchronized
     private fun waitForRequestRateLimit(deadline: Long) {
-        var waitNanos = nextRequestAtNanos - System.nanoTime()
-        while (waitNanos > 0) {
-            val remainingTime = remainingProviderTime(deadline)
-            TimeUnit.NANOSECONDS.sleep(minOf(waitNanos, TimeUnit.MILLISECONDS.toNanos(remainingTime)))
-            waitNanos = nextRequestAtNanos - System.nanoTime()
+        if (!requestRateLimiter.tickBlocking(Duration.ofMillis(remainingProviderTime(deadline)))) {
+            throw SocketTimeoutException("Payment deadline exceeded while waiting for request rate limit.")
         }
-        remainingProviderTime(deadline)
-        nextRequestAtNanos = System.nanoTime() + requestIntervalNanos
     }
 
     private fun remainingProviderTime(deadline: Long): Long {

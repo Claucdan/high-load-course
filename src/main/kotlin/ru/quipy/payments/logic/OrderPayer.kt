@@ -38,11 +38,11 @@ class OrderPayer(
     private val queueRejectedCounter = registry.counter("payment.rejected", "reason", "queue_full")
     private val deadlineRejectedCounter = registry.counter("payment.rejected", "reason", "deadline")
     private val processingTimeMillis = accountProperties.sumOf { it.averageProcessingTime.toMillis().coerceAtLeast(1) }
-    private val requestRate = accountProperties.minOf { it.rateLimitPerSec / 1.05 }
+    private val requestRate = accountProperties.minOf { it.rateLimitPerSec.toDouble() }
     private val workerCount =
         minOf(
             accountProperties.maxOf { it.parallelRequests },
-            maxOf(1, ceil(requestRate * processingTimeMillis / 1_000).toInt()),
+            maxOf(1, ceil(requestRate * processingTimeMillis * 2 / 1_000).toInt()),
         )
     private val processingRate =
         minOf(

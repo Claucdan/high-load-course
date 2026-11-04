@@ -9,6 +9,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
+import ru.quipy.payments.logic.PaymentAdmissionLimiter
 import java.util.*
 
 @RestController
@@ -20,6 +21,9 @@ class APIController {
 
     @Autowired
     private lateinit var orderPayer: OrderPayer
+
+    @Autowired
+    private lateinit var paymentAdmissionLimiter: PaymentAdmissionLimiter
 
     @PostMapping("/users")
     fun createUser(
@@ -67,7 +71,7 @@ class APIController {
     }
 
     @PostMapping("/orders/{orderId}/payment")
-    fun payOrder(
+    suspend fun payOrder(
         @PathVariable orderId: UUID,
         @RequestParam deadline: Long,
     ): ResponseEntity<PaymentSubmissionDto> {
@@ -75,11 +79,18 @@ class APIController {
         val order =
             orderRepository.findById(orderId) ?: throw IllegalArgumentException("No such order $orderId")
 
+        if (!paymentAdmissionLimiter.acquire(deadline)) {
+            return ResponseEntity
+                .status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, paymentAdmissionLimiter.retryAfter().toString())
+                .build()
+        }
+
         val createdAt =
             orderPayer.processPayment(orderId, order.price, paymentId, deadline)
                 ?: return ResponseEntity
                     .status(HttpStatus.TOO_MANY_REQUESTS)
-                    .header(HttpHeaders.RETRY_AFTER, (System.currentTimeMillis() + 500).toString())
+                    .header(HttpHeaders.RETRY_AFTER, paymentAdmissionLimiter.retryAfter().toString())
                     .build()
 
         orderRepository.save(order.copy(status = OrderStatus.PAYMENT_IN_PROGRESS))
