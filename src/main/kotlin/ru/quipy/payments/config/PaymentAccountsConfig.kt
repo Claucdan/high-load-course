@@ -5,6 +5,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.context.properties.ConfigurationProperties
+import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import ru.quipy.core.EventSourcingService
@@ -14,10 +16,14 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.time.Duration
 import java.util.*
 
 @Configuration
-class PaymentAccountsConfig {
+@EnableConfigurationProperties(PaymentRetryProperties::class)
+class PaymentAccountsConfig(
+    private val retryProperties: PaymentRetryProperties,
+) {
     companion object {
         private val javaClient = HttpClient.newBuilder().build()
         private val mapper = ObjectMapper().registerKotlinModule().registerModules(JavaTimeModule())
@@ -71,6 +77,12 @@ class PaymentAccountsConfig {
                     paymentProviderHostPort,
                     token,
                     registry,
+                    retryProperties.attemptTimeouts[it.accountName],
                 )
             }
 }
+
+@ConfigurationProperties("payment.retry")
+data class PaymentRetryProperties(
+    val attemptTimeouts: Map<String, Duration> = emptyMap(),
+)
