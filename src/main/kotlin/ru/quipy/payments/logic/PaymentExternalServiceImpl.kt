@@ -27,6 +27,7 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentProviderHostPort: String,
     private val token: String,
     private val registry: MeterRegistry,
+    attemptTimeout: Duration? = null,
 ) : PaymentExternalSystemAdapter {
     companion object {
         private const val MAX_ATTEMPTS = 3
@@ -40,6 +41,10 @@ class PaymentExternalSystemAdapterImpl(
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
     private val rateLimitPerSec = properties.rateLimitPerSec
+    private val attemptTimeoutMillis = attemptTimeout?.toMillis()?.also { require(it > 0) }
+    private val retryProcessingMillis = minOf(properties.averageProcessingTime.toMillis(), attemptTimeoutMillis ?: Long.MAX_VALUE)
+    private val retryCounter = registry.counter("payment.retries", "account", accountName)
+    private val retryDeadlineCounter = registry.counter("payment.retry.skipped", "account", accountName, "reason", "deadline")
 
     private val requestRateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1).plusMillis(1))
     private val client =
@@ -49,14 +54,21 @@ class PaymentExternalSystemAdapterImpl(
             .retryOnConnectionFailure(false)
             .addNetworkInterceptor { chain ->
                 val request = chain.request()
-                val deadline = request.tag(Long::class.javaObjectType)!!
+                val attempt = request.tag(PaymentRequestContext::class.java)!!
+                val deadline = attempt.deadline
                 waitForRequestRateLimit(deadline)
-                val providerTimeout = Duration.ofMillis(remainingProviderTime(deadline))
+                val remaining = remainingProviderTime(deadline)
+                if (attemptTimeoutMillis != null && attempt.retry && remaining < retryProcessingMillis) {
+                    retryDeadlineCounter.increment()
+                    throw SocketTimeoutException("Insufficient payment deadline budget for another attempt.")
+                }
+                val providerTimeout = Duration.ofMillis(minOf(remaining, attemptTimeoutMillis ?: remaining))
                 val url =
                     request.url
                         .newBuilder()
                         .addQueryParameter("timeout", providerTimeout.toString())
                         .build()
+                if (attempt.retry) retryCounter.increment()
                 chain.proceed(request.newBuilder().url(url).build())
             }.build()
     private val requestWindow = Semaphore(properties.parallelRequests, true)
@@ -68,7 +80,6 @@ class PaymentExternalSystemAdapterImpl(
             .tag("account", accountName)
             .publishPercentiles(0.95)
             .register(registry)
-    private val retryCounter = registry.counter("payment.retries", "account", accountName)
     private val recoveredCounter = registry.counter("payment.recovered", "account", accountName)
 
     init {
@@ -81,7 +92,7 @@ class PaymentExternalSystemAdapterImpl(
             .builder("payment.requests.waiting", requestWindow) { it.queueLength.toDouble() }
             .tag("account", accountName)
             .register(registry)
-        listOf("success", "temporary_error", "rate_limit", "provider_rejected", "deadline", "timeout", "error").forEach {
+        listOf("success", "temporary_error", "rate_limit", "provider_rejected", "provider_timeout", "deadline", "timeout", "error").forEach {
             registry.counter("payment.requests", "account", accountName, "outcome", it)
         }
         listOf("success", "failed").forEach {
@@ -100,13 +111,15 @@ class PaymentExternalSystemAdapterImpl(
         try {
             repeat(MAX_ATTEMPTS) { attempt ->
                 if (attempt > 0) {
-                    val processingBudget = properties.averageProcessingTime.toMillis() + PAYMENT_RESPONSE_MARGIN_MILLIS
-                    if (deadline - now() <= processingBudget + retryDelayMillis) return
+                    val processingBudget = retryProcessingMillis + PAYMENT_RESPONSE_MARGIN_MILLIS
+                    if (deadline - now() <= processingBudget + retryDelayMillis) {
+                        retryDeadlineCounter.increment()
+                        return
+                    }
                     if (retryDelayMillis > 0) TimeUnit.MILLISECONDS.sleep(retryDelayMillis)
-                    retryCounter.increment()
                 }
 
-                val result = performAttempt(paymentId, amount, paymentStartedAt, deadline)
+                val result = performAttempt(paymentId, amount, paymentStartedAt, deadline, retry = attempt > 0)
                 if (result.success) {
                     success = true
                     if (attempt > 0) recoveredCounter.increment()
@@ -126,6 +139,7 @@ class PaymentExternalSystemAdapterImpl(
         amount: Int,
         paymentStartedAt: Long,
         deadline: Long,
+        retry: Boolean,
     ): PaymentAttemptResult {
         val transactionId = UUID.randomUUID()
 
@@ -151,7 +165,7 @@ class PaymentExternalSystemAdapterImpl(
                     .run {
                         url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
                         post(emptyBody)
-                        tag(Long::class.javaObjectType, deadline)
+                        tag(PaymentRequestContext::class.java, PaymentRequestContext(deadline, retry))
                     }.build()
 
             waitTimer.record(maxOf(0, now() - paymentStartedAt), TimeUnit.MILLISECONDS)
@@ -173,12 +187,23 @@ class PaymentExternalSystemAdapterImpl(
                 requestWindow.release()
                 windowAcquired = false
                 val success = response.isSuccessful && body.result
+                val confirmedTimeout =
+                    response.code == 408 &&
+                        !body.result && body.message == "Timeout" &&
+                        body.transactionId == transactionId.toString() && body.paymentId == paymentId.toString()
+                if (response.code == 408) {
+                    registry
+                        .timer("payment.provider.timeout.remaining", "account", accountName, "confirmed", confirmedTimeout.toString())
+                        .record(maxOf(0, deadline - now()), TimeUnit.MILLISECONDS)
+                }
+                val retryableTimeout = confirmedTimeout && attemptTimeoutMillis != null
                 val retryable =
                     !success &&
-                        (response.code in setOf(429, 500, 502, 503, 504) || response.isSuccessful && body.message == "Temporary error")
+                        (retryableTimeout || response.code in setOf(429, 500, 502, 503, 504) || response.isSuccessful && body.message == "Temporary error")
                 outcome =
                     when {
                         success -> "success"
+                        retryableTimeout -> "provider_timeout"
                         response.code == 408 -> "deadline"
                         response.code == 429 -> "rate_limit"
                         retryable -> "temporary_error"
@@ -229,6 +254,11 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
+
+    private data class PaymentRequestContext(
+        val deadline: Long,
+        val retry: Boolean,
+    )
 
     private data class PaymentAttemptResult(
         val success: Boolean,
